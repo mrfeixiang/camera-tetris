@@ -268,24 +268,52 @@ let poseRunning = false;
 let lastGesture = '';
 let gestureTimer = 0;
 let useCamera = true;
+let poseReady = false; // true once model finishes loading
 
+// Load pose model in the background; game starts immediately without waiting.
+// Uses a self-hosted model file to avoid dependency on storage.googleapis.com.
 async function initPose() {
+  const statusEl = document.getElementById('cameraStatus');
   try {
     const filesetResolver = await FilesetResolver.forVisionTasks(
       'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
     );
+    // Self-hosted model avoids the storage.googleapis.com block in some regions.
+    // Falls back to the remote URL if the local file is unavailable.
+    let modelPath = 'models/pose_landmarker_lite.task';
+    try {
+      const probe = await fetch(modelPath, { method: 'HEAD' });
+      if (!probe.ok) throw new Error('local model not found');
+    } catch {
+      modelPath = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+    }
     poseLandmarker = await PoseLandmarker.createFromOptions(filesetResolver, {
-      baseOptions: {
-        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
-        delegate: 'GPU'
-      },
+      baseOptions: { modelAssetPath: modelPath, delegate: 'GPU' },
       runningMode: 'VIDEO',
       numPoses: 1
     });
-    console.log('Pose model loaded');
+    poseReady = true;
+    console.log('Pose model loaded from', modelPath);
+    // If game is already running, activate pose loop now
+    if (gameRunning && useCamera) {
+      poseRunning = true;
+      startPoseLoop();
+    }
+    if (statusEl.dataset.poseLoading) {
+      statusEl.style.display = 'none';
+      delete statusEl.dataset.poseLoading;
+    }
   } catch (e) {
     console.warn('Pose init failed, falling back to keyboard only:', e);
     useCamera = false;
+    poseReady = false;
+    if (statusEl.dataset.poseLoading) {
+      statusEl.innerHTML = '&#9888;&#65039; Pose model failed to load. Camera gestures disabled; keyboard still works.';
+      statusEl.style.background = 'rgba(150,100,0,0.9)';
+      statusEl.style.display = 'block';
+      delete statusEl.dataset.poseLoading;
+      setTimeout(() => { statusEl.style.display = 'none'; }, 4000);
+    }
   }
 }
 
@@ -754,10 +782,11 @@ function startGame() {
   document.getElementById('gameOver').style.display = 'none';
   if (animFrameId) cancelAnimationFrame(animFrameId);
   animFrameId = requestAnimationFrame(gameLoop);
-  if (useCamera) {
+  if (useCamera && poseReady) {
     poseRunning = true;
     startPoseLoop();
   }
+  // If model is still loading, the initPose() callback will start the loop.
 }
 
 function endGame() {
@@ -791,11 +820,31 @@ document.addEventListener('keydown', (e) => {
 
 // ========== UI Events ==========
 document.getElementById('startBtn').addEventListener('click', async () => {
+  const statusEl = document.getElementById('cameraStatus');
+
   if (useCamera) {
-    await startCamera();
-    await initPose();
+    // Step 1: request camera permission immediately (user gesture context).
+    // This must happen synchronously inside the click handler.
+    const camOk = await startCamera();
+
+    if (camOk) {
+      // Step 2: start the game right away without waiting for the model.
+      startGame();
+
+      // Step 3: load the pose model in the background.
+      statusEl.innerHTML = '&#128247; Loading pose model... gestures will activate shortly.';
+      statusEl.style.background = 'rgba(0,100,0,0.85)';
+      statusEl.style.display = 'block';
+      statusEl.dataset.poseLoading = '1';
+      initPose(); // intentionally not awaited
+    } else {
+      // Camera unavailable: start in keyboard-only mode.
+      useCamera = false;
+      startGame();
+    }
+  } else {
+    startGame();
   }
-  startGame();
 });
 
 document.getElementById('restartBtn').addEventListener('click', () => {
