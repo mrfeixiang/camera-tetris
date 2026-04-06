@@ -496,44 +496,66 @@ const PIECES = {
 };
 const PIECE_KEYS = Object.keys(PIECES);
 
+// ========== Canvas factory (OffscreenCanvas with fallback) ==========
+// OffscreenCanvas is supported in Chrome 69+, Firefox 105+, Safari 16.4+.
+// For older browsers we fall back to a detached <canvas> element so the
+// module never throws at init time and all click handlers still register.
+function makeCanvas(w, h) {
+  if (typeof OffscreenCanvas !== 'undefined') {
+    try { return new OffscreenCanvas(w, h); } catch (e) { /* fall through */ }
+  }
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  return c;
+}
+
 // ========== Offscreen block cache ==========
-// Pre-render each block color to an offscreen canvas so drawBlock becomes
-// a single drawImage call instead of 5 fillRect calls per block.
+// Pre-render each block color so drawBlock becomes a single drawImage call.
 const blockCache = {};
 function buildBlockCache() {
-  for (const key of PIECE_KEYS) {
-    const color = PIECES[key].color;
-    if (blockCache[color]) continue;
-    const oc = new OffscreenCanvas(BLOCK, BLOCK);
-    const octx = oc.getContext('2d');
-    octx.fillStyle = color;
-    octx.fillRect(1, 1, BLOCK - 2, BLOCK - 2);
-    octx.fillStyle = 'rgba(255,255,255,0.2)';
-    octx.fillRect(1, 1, BLOCK - 2, 4);
-    octx.fillRect(1, 1, 4, BLOCK - 2);
-    octx.fillStyle = 'rgba(0,0,0,0.2)';
-    octx.fillRect(BLOCK - 5, 1, 4, BLOCK - 2);
-    octx.fillRect(1, BLOCK - 5, BLOCK - 2, 4);
-    blockCache[color] = oc;
+  try {
+    for (const key of PIECE_KEYS) {
+      const color = PIECES[key].color;
+      if (blockCache[color]) continue;
+      const oc = makeCanvas(BLOCK, BLOCK);
+      const octx = oc.getContext('2d');
+      octx.fillStyle = color;
+      octx.fillRect(1, 1, BLOCK - 2, BLOCK - 2);
+      octx.fillStyle = 'rgba(255,255,255,0.2)';
+      octx.fillRect(1, 1, BLOCK - 2, 4);
+      octx.fillRect(1, 1, 4, BLOCK - 2);
+      octx.fillStyle = 'rgba(0,0,0,0.2)';
+      octx.fillRect(BLOCK - 5, 1, 4, BLOCK - 2);
+      octx.fillRect(1, BLOCK - 5, BLOCK - 2, 4);
+      blockCache[color] = oc;
+    }
+  } catch (e) {
+    console.warn('Block cache build failed, using direct draw fallback:', e);
   }
 }
 buildBlockCache();
 
 // ========== Static grid background (pre-rendered once) ==========
-const gridBg = new OffscreenCanvas(COLS * BLOCK, ROWS * BLOCK);
+let gridBg = null;
 (function buildGrid() {
-  const gc = gridBg.getContext('2d');
-  gc.fillStyle = 'rgba(0, 0, 0, 0.5)';
-  gc.fillRect(0, 0, gridBg.width, gridBg.height);
-  gc.strokeStyle = 'rgba(255,255,255,0.08)';
-  gc.lineWidth = 1;
-  gc.beginPath();
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      gc.rect(c * BLOCK, r * BLOCK, BLOCK, BLOCK);
+  try {
+    const bg = makeCanvas(COLS * BLOCK, ROWS * BLOCK);
+    const gc = bg.getContext('2d');
+    gc.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    gc.fillRect(0, 0, bg.width, bg.height);
+    gc.strokeStyle = 'rgba(255,255,255,0.08)';
+    gc.lineWidth = 1;
+    gc.beginPath();
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        gc.rect(c * BLOCK, r * BLOCK, BLOCK, BLOCK);
+      }
     }
+    gc.stroke();
+    gridBg = bg;
+  } catch (e) {
+    console.warn('Grid background build failed, using direct draw fallback:', e);
   }
-  gc.stroke();
 })();
 
 let board = [];
@@ -697,8 +719,21 @@ function drawBlock(x, y, color) {
 }
 
 function drawBoard() {
-  // 1. Blit pre-rendered static grid background (single drawImage)
-  ctx.drawImage(gridBg, 0, 0);
+  // 1. Blit pre-rendered static grid background (single drawImage if available)
+  if (gridBg) {
+    ctx.drawImage(gridBg, 0, 0);
+  } else {
+    // Fallback: draw background directly
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.fillRect(0, 0, gameCanvas.width, gameCanvas.height);
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        ctx.strokeRect(c * BLOCK, r * BLOCK, BLOCK, BLOCK);
+      }
+    }
+  }
 
   // 2. Placed blocks
   for (let r = 0; r < ROWS; r++) {
